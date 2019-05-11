@@ -1,0 +1,164 @@
+---
+  - name: Remove all folders
+    hosts: [controller]
+    become: yes
+    tasks:
+      - file:
+          path: /vagrant/{{ net_name }}
+          state: absent
+
+  - name: Remove all folders
+    hosts: [nodes]
+    become: yes
+    tasks:
+      - file:
+          path: /{{ net_name }}
+          state: absent
+
+  - name: Ensure folder exists
+    hosts: [controller]
+    become: yes
+    tasks:
+      - file:
+          path: /vagrant/{{ net_name }}
+          state: directory
+
+  - name: Ensure folder exists
+    hosts: [nodes]
+    become: yes
+    tasks:
+      - file:
+          path: /{{ net_name }}
+          state: directory
+
+  - name: Create accounts
+    hosts: [nodes]
+    become: yes
+    tasks:
+      - stat:
+          path: /{{ net_name }}/password.txt
+        register: password_exists
+      - block:
+          - shell: |-
+              echo "{{ account_password }}" > /{{ net_name }}/password.txt
+          - shell: |-
+              geth account new --password /{{ net_name }}/password.txt --datadir /{{ net_name }} 2> /dev/null
+            register: account_command
+
+          - set_fact:
+              account: "{{ account_command.stdout | regex_replace('.*\\{(.*)\\}.*', '\\1') }}"
+
+          - shell: |-
+              echo "{{ account }}" > /{{ net_name }}/account.txt
+
+          - shell: |-
+              echo "{{ hostvars[ansible_hostname]['account'] }}" >> /vagrant/{{ net_name }}/accounts.txt
+            delegate_to: "{{ groups['controller'][0] }}"
+
+        when: password_exists.stat.exists == False
+
+  - name: Initialize genesis
+    hosts: [bootnode]
+    become: yes
+    tasks:
+      - stat:
+          path: /vagrant/{{ net_name }}/{{ net_name }}.json
+        register: genesis_exists
+      - block:
+          - shell: |-
+              set timeout 30
+              set sealAccounts "{% for node in groups['nodes'] %}{{ hostvars[node]['account'] }}\r{% endfor %}"
+              set genesisSavePath "/vagrant/{{ net_name }}"
+
+              spawn puppeth --network {{ net_name }}
+
+              expect "What would you like to do? (default = stats)"
+              send "2\r"
+
+              expect "What would you like to do? (default = create)"
+              send "1\r"
+
+              expect "Which consensus engine to use? (default = clique)"
+              send "2\r"
+
+              expect "How many seconds should blocks take? (default = 15)"
+              send "5\r"
+
+              expect "Which accounts are allowed to seal? (mandatory at least one)"
+              send "$sealAccounts\r"
+
+              expect "Which accounts should be pre-funded? (advisable at least one)"
+              send "$sealAccounts\r"
+
+              expect "Should the precompile-addresses (0x1 .. 0xff) be pre-funded with 1 wei? (advisable yes)"
+              send "\r"
+
+              expect "Specify your chain/network ID if you want an explicit one (default = random)"
+              send "61323\r"
+              
+              expect "What would you like to do? (default = stats)"
+              send "2\r"
+
+              expect "2. Export genesis configurations"
+              send "2\r"
+
+              expect "Which folder to save the genesis specs into? (default = current)"
+              send "$genesisSavePath\r"
+
+              expect "What would you like to do? (default = stats)"
+              send \x03
+
+              exit 0
+            args:
+              executable: /usr/bin/expect
+
+          - shell: |-
+              geth --datadir /{{ net_name }}/ init /vagrant/{{ net_name }}/{{ net_name }}.json
+            delegate_to: "{{ item }}"
+            with_items: "{{ groups['nodes'] }}"
+
+        when: genesis_exists.stat.exists == False
+
+  - name: Initialize bootnode
+    hosts: [bootnode]
+    become: yes
+    tasks:
+      - stat:
+          path: /vagrant/{{ net_name }}/boot.key
+        register: boot_key_exists
+      - block:
+          - shell: |-
+              bootnode -genkey /vagrant/{{ net_name }}/boot.key
+
+          - shell: |-
+              bootnode -nodekey /vagrant/{{ net_name }}/boot.key -writeaddress
+            register: bootnode_output
+
+          - copy:
+              content: "enode://{{ bootnode_output.stdout | replace('\r','') | replace('\n','') | replace(' ','') }}@{{ ansible_ssh_host }}:30310"
+              dest: "/vagrant/{{ net_name }}/boot_enode.txt"
+
+          - shell: |-
+              nohup bootnode -nodekey /vagrant/{{ net_name }}/boot.key -verbosity 9 -addr :30310 > /dev/null 2>&1 &
+
+        when: boot_key_exists.stat.exists == False
+
+  - name: Initialize peers
+    hosts: [nodes]
+    become: yes
+    tasks:
+      - shell: |-
+          nohup geth \
+            --datadir /{{ net_name }} \
+            --syncmode 'full' \
+            --port 30311 \
+            --rpc \
+            --rpcaddr 'localhost' \
+            --rpcport 8545 \
+            --rpcapi 'personal,db,eth,net,web3,txpool,miner' \
+            --bootnodes '{{ lookup('file', '/vagrant/' + net_name + '/boot_enode.txt') }}' \
+            --networkid 61323 \
+            --gasprice '1' \
+            --unlock '0x{{ account }}' \
+            --password /{{ net_name }}/password.txt \
+            --mine < /dev/null > /{{ net_name }}/geth_output.txt 2>&1 &

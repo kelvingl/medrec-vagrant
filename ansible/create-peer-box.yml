@@ -1,0 +1,59 @@
+---
+  - name: Install expect
+    hosts: [controller]
+    become: yes
+    tasks:
+      - apt:
+          name: 
+            - python3-pip
+            - expect
+          update_cache: yes
+      - pip:
+          executable: pip3
+          name: pexpect
+
+  - name: Install ethereum
+    hosts: [controller]
+    become: yes
+    tasks:
+      - apt_repository:
+          repo: ppa:ethereum/ethereum
+      - apt:
+          name: ethereum
+
+  - name: Install golang
+    hosts: [controller]
+    become: yes
+    tasks:
+      - get_url:
+          url: https://dl.google.com/go/go1.12.4.linux-amd64.tar.gz
+          dest: /usr/local/src/go1.12.4.linux-amd64.tar.gz
+      - unarchive:
+          src: /usr/local/src/go1.12.4.linux-amd64.tar.gz
+          dest: /usr/local
+          copy: no
+      - copy:
+          content: |-
+            export PATH=$PATH:/usr/local/go/bin
+            export GOPATH=$HOME/go
+            export PATH=$GOPATH/bin:$PATH
+          dest: /etc/profile.d/go.sh
+          mode: 0777
+
+  - name: Install docker
+    hosts: [controller]
+    become: yes
+    tasks:
+      - apt_key:
+          url: https://download.docker.com/linux/ubuntu/gpg
+          state: present
+      - apt_repository:
+          repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+          state: present
+          filename: docker
+      - apt:
+          name: docker-ce
+      - user:
+          append: yes
+          groups: [docker]
+          name: vagrant
